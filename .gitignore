@@ -1,0 +1,7 @@
+sbom.json
+__pycache__/
+*.pyc
+tests/.bashisms
+tests/.invocations
+tests/.dockerhub-tags
+tests/.sbom

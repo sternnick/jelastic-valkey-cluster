@@ -1,0 +1,84 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Stub valkey-cli for the invocation tests. It answers only the commands init-cluster.sh issues, and
+# it is a fixture rather than a client: the point is to run the real script against the real command
+# line the manifest emits, with no cluster and no network.
+#
+# Knobs a test may set:
+#   STUB_ANNOUNCE_IP     the address nodes advertise at the start (default: the address they were
+#                        addressed by, which is the correct-behaviour case)
+#   STUB_ANNOUNCE_STICK  an address that CONFIG SET cannot change - the repair-failure case
+#   STUB_CLUSTER_STATE   what CLUSTER INFO reports for cluster_state (default ok)
+#   STUB_ANNOUNCE_SEEN   file: every cluster-announce-ip this stub accepted is appended to it, so a
+#                        test can assert the repair was actually attempted, not just announced
+
+args="$*"
+
+host=127.0.0.1
+prev=
+for a in "$@"; do
+    [ "$prev" = "-h" ] && host=$a
+    prev=$a
+done
+
+say() { printf '%s\n' "$1"; }
+
+announce_now() {
+    # What this node would answer for cluster-announce-ip right now.
+    [ -n "${STUB_ANNOUNCE_STICK:-}" ] && { printf '%s\n' "$STUB_ANNOUNCE_STICK"; return; }
+    if [ -n "${STUB_ANNOUNCE_FILE:-}" ] && [ -f "$STUB_ANNOUNCE_FILE" ]; then
+        sed -n "s/^$host //p" "$STUB_ANNOUNCE_FILE" | tail -n 1
+        return
+    fi
+    printf '%s\n' "${STUB_ANNOUNCE_IP:-$host}"
+}
+
+case $args in
+    *" cluster create "*|*" cluster check "*)
+        say "[OK] All nodes have slots assigned (stub)"
+        ;;
+    *" cluster info"*)
+        say "cluster_state:${STUB_CLUSTER_STATE:-ok}"
+        say 'cluster_slots_assigned:16384'
+        say 'cluster_slots_ok:16384'
+        say 'cluster_slots_pfail:0'
+        say 'cluster_slots_fail:0'
+        say 'cluster_known_nodes:3'
+        say 'cluster_size:3'
+        say 'cluster_myid:0000000000000000000000000000000000000001'
+        ;;
+    *" cluster nodes"*)
+        say 'aaa1 10.11.0.1:6379@16379,none myself,master - 0 0 1 connected 0-5460'
+        say 'aaa2 10.11.0.2:6379@16379,none master - 0 0 2 connected 5461-10923'
+        say 'aaa3 10.11.0.3:6379@16379,none master - 0 0 3 connected 10924-16383'
+        ;;
+    *" config get cluster-enabled"*)
+        printf 'cluster-enabled\nyes\n'
+        ;;
+    *" config get cluster-announce-ip"*)
+        printf 'cluster-announce-ip\n%s\n' "$(announce_now)"
+        ;;
+    *" config get "*)
+        p=$(printf '%s' "$args" | sed -n 's/.*config get \([^ ]*\).*/\1/p')
+        printf '%s\n%s\n' "$p" yes
+        ;;
+    *" config set cluster-announce-ip "*)
+        v=$(printf '%s' "$args" | sed -n 's/.*config set cluster-announce-ip \([^ ]*\).*/\1/p')
+        if [ -n "${STUB_ANNOUNCE_FILE:-}" ]; then
+            printf '%s %s\n' "$host" "$v" >> "$STUB_ANNOUNCE_FILE"
+        fi
+        [ -n "${STUB_ANNOUNCE_SEEN:-}" ] && printf '%s %s\n' "$host" "$v" >> "$STUB_ANNOUNCE_SEEN"
+        say OK
+        ;;
+    *" config set "*)
+        say OK
+        ;;
+    *ping*|*PING*)
+        say PONG
+        ;;
+    *)
+        printf 'ERR stub got: %s\n' "$args" >&2
+        exit 1
+        ;;
+esac

@@ -1,0 +1,37 @@
+#!/bin/sh
+# Stub netcat for the test harness. The tests are about control flow, not real sockets: a real nc on
+# the machine running the tests would report every peer unreachable and abort the form role, and a
+# real listener would collide with whatever else is bound.
+#
+# Knobs:
+#   STUB_NC_FAIL=<port>   that port refuses connections
+#   STUB_NC_NO_Z=1        a build without -z: the scan form exits 2 (usage), the plain connect still
+#                         works - which is exactly the fallback probe.sh and init-cluster.sh must use
+#   STUB_NC_LOG=<file>    append every "host port" asked about, so a test can assert the matrix ran
+
+# The port is the last numeric argument, in either option order.
+port=
+for a in "$@"; do
+    case $a in
+        ''|*[!0-9]*) : ;;
+        *) port=$a ;;
+    esac
+done
+
+case " $* " in
+    *" -z "*|*-z*)
+        if [ -n "${STUB_NC_NO_Z:-}" ]; then
+            printf 'nc: illegal option -- z\n' >&2
+            exit 2
+        fi
+        ;;
+esac
+
+[ -n "${STUB_NC_LOG:-}" ] && printf '%s\n' "$*" >> "$STUB_NC_LOG"
+
+if [ -n "${STUB_NC_FAIL:-}" ] && [ "$port" = "$STUB_NC_FAIL" ]; then
+    printf 'nc: connect to %s failed\n' "$port" >&2
+    exit 1
+fi
+
+exit 0

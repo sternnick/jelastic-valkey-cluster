@@ -1,0 +1,23 @@
+#!/bin/sh
+# Stub `ip` for the invocation tests.
+#
+# STUB_IP          the venet0 address (default 10.11.0.1)
+# STUB_IP_IFACES   "iface:addr iface:addr ..." - full control over the interface table, in the order
+#                  given, so a test can put a decoy interface first and prove which address the
+#                  script picks. Without this the outcome depends on the machine running the test.
+if [ -n "${STUB_IP_IFACES:-}" ]; then
+    printf '1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 state UNKNOWN\n'
+    printf '    inet 127.0.0.1/8 scope host lo\n'
+    n=1
+    for pair in $STUB_IP_IFACES; do
+        n=$((n + 1))
+        printf '%s: %s: <BROADCAST,UP,LOWER_UP> mtu 1500 state UNKNOWN\n' "$n" "${pair%%:*}"
+        printf '    inet %s/16 scope global %s\n' "${pair#*:}" "${pair%%:*}"
+    done
+    exit 0
+fi
+
+printf '1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 state UNKNOWN\n'
+printf '    inet 127.0.0.1/8 scope host lo\n'
+printf '2: venet0: <BROADCAST,POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1500 state UNKNOWN\n'
+printf '    inet %s/16 scope global venet0\n' "${STUB_IP:-10.11.0.1}"

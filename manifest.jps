@@ -1,0 +1,275 @@
+type: install
+name: Valkey Cluster
+id: valkey-cluster
+version: 1.0.4
+targetEditions: any
+logo: /images/valkey-cluster.png?raw=true
+
+description:
+  short: A 3-node Valkey cluster (16384 slots sharded) built from the official Docker image, with the cluster formed at install time.
+  text: |
+    A full application manifest, not an add-on: it creates the environment topology and forms the
+    cluster. There is no Jelastic-certified Valkey stack, so the nodes come from the official
+    valkey/valkey image and everything Valkey-specific is either a startup flag or a script.
+
+    3 nodes means 3 primaries and no replicas. Each primary holds ~5461 slots; if one node dies the
+    slots it owned are unavailable until it returns. Pick 6 nodes for 3 primaries + 3 replicas if
+    you need failover.
+
+    Why the flags rather than a valkey.conf: cluster-enabled and cluster-config-file are
+    IMMUTABLE_CONFIG in the Valkey source, so they cannot be set with CONFIG SET. A Docker-image
+    node on Jelastic is started from its image plus the node's environment, so the durable place
+    for a startup-only directive is VALKEY_EXTRA_FLAGS, which the image entrypoint appends to
+    valkey-server. Editing a config file and restarting, as the Redis add-ons do, is not available
+    here.
+
+# Pinned to a tag, not to a branch, and the tag is the same ref the scripts are fetched from.
+# Measured on 2026-10-27: cdn.jsdelivr.net/gh/<repo>@main served an older commit than the branch
+# itself and ignored a ?_r= cache-buster, while an immutable ref (a sha, or a tag) served exactly one
+# generation of files. A versioned manifest whose scripts come from a moving branch is exactly the
+# mismatch that produces "the script does not understand the manifest's arguments", so the pin is the
+# fix, and tests/validate.sh refuses a mutable baseUrl.
+#
+# Release procedure: land the change on main, then set `version:` above and the ref in this line to
+# the next tag, commit, `git tag -a <that-tag> -m ... && git push <remote> main <that-tag>`. A
+# changed manifest must never be republished under a tag that already meant something else - that is
+# the two-generations-under-one-ref case this whole section is about.
+#
+# BEFORE INSTALLING: replace <owner>/<repo> with the account and repository this manifest is actually
+# served from - the nodes download their scripts over HTTP from this one line, so a placeholder here
+# fails the install at the fetch step. tests/validate.sh refuses anything that looks like a private
+# account path, which is why the placeholder is spelled as one.
+baseUrl: https://raw.githubusercontent.com/<owner>/<repo>/v1.0.4
+
+categories:
+  - apps/clusters
+  - apps/databases
+
+globals:
+  valkeyPswd: ${fn.password}
+  # The base OS of the image must be one the platform ships a system-container template for: a
+  # custom image is unpacked into a Virtuozzo system container. The published list is AlmaLinux 9,
+  # Alpine 3, CentOS 7/8, Debian 12, RHEL 7, Ubuntu 18.04-24.04, amd64 only
+  # (www.virtuozzo.com/application-management-docs/container-image-requirements/). Debian 13 is not on
+  # it yet, and valkey/valkey:latest IS Debian 13 - its amd64 config history reads
+  # "# debian.sh --arch 'amd64' out/ 'trixie'" - which surfaces at install time as
+  #     OS debian:13 ... is not supported
+  # A Debian base does exist for Valkey, but only to 8.1.3 (the -bookworm line), so Alpine is the
+  # only current release that needs nothing built by hand. The tags below pin the Alpine release too,
+  # because OS compatibility is the constraint and an "-alpine" alias could move to another Alpine
+  # underneath a running deployment.
+  imageRepo: valkey/valkey
+  clientPort: 6379
+  # cluster-port defaults to 0, which the source documents as "command port + 10000".
+  clusterBusPort: 16379
+  nodeTimeout: 5000
+
+settings:
+  fields:
+    - name: valkeyTag
+      type: list
+      caption: Valkey image tag (base OS must be on the platform's supported list; Alpine 3 for a current release)
+      values:
+        9.1.3-alpine3.24: '9.1.3-alpine3.24 (stable, Alpine 3.24.3)'
+        9.1.2-alpine3.24: '9.1.2-alpine3.24 (verified on a live install; superseded by 9.1.3)'
+        9.0.7-alpine3.24: '9.0.7-alpine3.24 (previous stable, Alpine 3.24.3)'
+        8.1.11-alpine3.24: '8.1.11-alpine3.24 (8.x line, Alpine 3.24.3)'
+        9.2-alpine3.24: '9.2-alpine3.24 (the 9.2 image is built from 9.2.0-rc1 - pre-release, testing only)'
+      default: 9.1.3-alpine3.24
+      required: true
+
+    - name: nodeCount
+      type: list
+      caption: Cluster nodes
+      values:
+        3: '3 nodes - 3 primaries, no failover (minimum)'
+        4: '4 nodes - 4 primaries'
+        5: '5 nodes - 5 primaries'
+        6: '6 nodes - 3 primaries + 3 replicas'
+      default: 3
+      required: true
+
+    # With 3 nodes and 1 replica the cluster create call cannot be satisfied (it needs 2x nodes),
+    # so the pair is validated in init-cluster.sh rather than discovered at install time.
+    - name: replicasPerPrimary
+      type: list
+      caption: Replicas per primary
+      values:
+        0: '0 - every node is a primary (needs 3+ nodes)'
+        1: '1 - half the nodes are replicas (needs 6+ nodes)'
+      default: 0
+      required: true
+
+    - name: cloudlets
+      type: list
+      caption: Cloudlets per node
+      values:
+        8: '8 cloudlets'
+        16: '16 cloudlets'
+        32: '32 cloudlets'
+      default: 16
+      required: true
+
+    - name: maxMemory
+      type: string
+      caption: maxmemory per node
+      default: 1024mb
+      regex: '^[0-9]+(mb|gb)$'
+      regexText: A value like 1024mb or 2gb, comfortably under the node's memory.
+      required: true
+
+    - name: evictionPolicy
+      type: list
+      caption: maxmemory-policy
+      values:
+        noeviction: 'noeviction (writes error when full)'
+        allkeys-lru: 'allkeys-lru'
+        volatile-lru: 'volatile-lru (only keys with a TTL)'
+        volatile-ttl: 'volatile-ttl'
+      default: noeviction
+      required: true
+
+    # A checkbox is not offered here, and that is a fix rather than a preference. The checkbox
+    # reached the container as `--appendonly true`, and the server answered, in /var/log/run.log on
+    # the first deployed environment, 2026-10-27:
+    #     *** FATAL CONFIG FILE ERROR (Version 9.1.3) ***
+    #     Reading the configuration file, at line 12
+    #     >>> 'appendonly "true"'
+    #     argument must be 'yes' or 'no'
+    # The node then had no valkey-server at all - no listener on 6379, no crash loop, nothing - and
+    # the install could not form a cluster for the simplest possible reason. A list carries the words
+    # the directive accepts, so the mistake cannot be made again from the dashboard.
+    - name: persistent
+      type: list
+      caption: Persistence (AOF)
+      values:
+        "yes": 'yes - append every write (AOF)'
+        "no": 'no - in-memory only, rebuild from your source of truth'
+      # Quoted, and that is not style. An unquoted `default: yes` is the YAML 1.1 boolean True - this
+      # is what made the v1.0.3 install fail exactly like v1.0.1: the platform reported
+      # "persistent": true, the flag reached the server as --appendonly true, and the node wrote
+      #     >>> 'appendonly "true"'  argument must be 'yes' or 'no'
+      # into /var/log/run.log. Every value that reaches a server directive is quoted here, and
+      # tests/validate.sh refuses a field whose default or keys came out of YAML as a boolean.
+      default: "yes"
+      required: true
+
+nodes:
+  - image: ${globals.imageRepo}:${settings.valkeyTag}
+    nodeGroup: nosqldb
+    count: ${settings.nodeCount}
+    cloudlets: ${settings.cloudlets}
+    diskLimit: 32
+    displayName: Valkey
+    skipNodeEmails: true
+    volumes:
+      - /data
+    env:
+      # Literals, so one moving part less: the two numbers also appear in globals, and
+      # tests/validate.sh refuses a mismatch. Placeholders do expand in an env value - a deployed node
+      # showed JELASTIC_PORTS=6379,16379 fully expanded - but they do NOT expand inside
+      # a *settings default*, which is where a probe node in the same deployment got the literal text
+      # ",${globals.clusterBusPort}". Keeping env literal removes that whole class from the one place
+      # where a wrong value means gossip never finishes.
+      JELASTIC_PORTS: "6379,16379"
+      # requirepass and masterauth belong in the startup flags rather than in a CONFIG SET, and the
+      # reason is durability: CONFIG SET requirepass is runtime-only, so a node that restarts would
+      # come back with no password. Everything here must therefore be a value the server can parse
+      # at exec time - which is why the persistent setting below is a yes/no list and not a
+      # checkbox, and why cluster-enabled/cluster-config-file (IMMUTABLE_CONFIG) are here at all.
+      VALKEY_EXTRA_FLAGS: >-
+        --cluster-enabled yes
+        --cluster-config-file nodes.conf
+        --cluster-node-timeout ${globals.nodeTimeout}
+        --protected-mode yes
+        --enable-debug-command no
+        --enable-module-command no
+        --enable-protected-configs no
+        --hide-user-data-from-log yes
+        --maxmemory ${settings.maxMemory}
+        --maxmemory-policy ${settings.evictionPolicy}
+        --appendonly ${settings.persistent}
+        --appendfsync everysec
+        --requirepass ${globals.valkeyPswd}
+        --masterauth ${globals.valkeyPswd}
+      # The password reaches the server through the node environment, not a command line, so it
+      # never appears in the install log or in `ps`. init-cluster.sh reads it back from here.
+      VALKEY_PASS: ${globals.valkeyPswd}
+
+onInstall:
+  - prepNodes
+  - formCluster
+  - checkCluster
+
+# Two events, both verified to exist: onAfterAddNode is listed in the events reference, and
+# onAfterScaleOut is what the official cluster manifests actually use. A scale-out adds a node; it
+# does not reshard 16384 slots, because moving keys has a cost the operator should choose to pay. So
+# these hooks report the state, and `valkey-cli --cluster reshard` is the next step by hand.
+onAfterAddNode [nosqldb]: checkCluster
+onAfterScaleOut [nosqldb]: checkCluster
+
+actions:
+  prepNodes:
+    cmd [nosqldb]:
+      - mkdir -p /var/lib/jelastic/valkey-cluster
+      - wget -qO /var/lib/jelastic/valkey-cluster/init-cluster.sh "${baseUrl}/scripts/init-cluster.sh"
+      - sh /var/lib/jelastic/valkey-cluster/init-cluster.sh --role prep --port ${globals.clientPort} --bus-port ${globals.clusterBusPort} --timeout ${globals.nodeTimeout} --maxmemory ${settings.maxMemory} --eviction ${settings.evictionPolicy} --aof ${settings.persistent}
+    user: root
+
+  # The peer list comes from GetEnvInfo. A placeholder would be shorter - ${nodes.nosqldb.join(address,)}
+  # is real and is what the official redis-cluster uses - but this step also needs each node's id, and
+  # one API call yields both, so the two cannot drift apart inside a step. jelastic-jps/mysql-cluster
+  # builds its Galera seeds the same way.
+  formCluster:
+    script: |
+      var resp = jelastic.env.control.GetEnvInfo('${env.envName}', session);
+      if (resp.result != 0) return resp;
+
+      var addrs = [];
+      for (var i = 0, n = resp.nodes; i < n.length; i++) {
+        if (n[i].nodeGroup == 'nosqldb' && n[i].address) addrs.push(n[i].address);
+      }
+
+      // result 0 means success to the engine, so a discovery failure must be a nonzero code. 1001
+      // is declared under responses: below so the dashboard says what went wrong. An earlier
+      // revision returned {result: 0, errorMessage: ...} here, which the platform reads as a
+      // successful step - the install finished green with no cluster formed.
+      if (addrs.length < 3) {
+        return {result: 1001, errorMessage: 'expected at least 3 nodes in group nosqldb, found ' + addrs.length};
+      }
+
+      resp = {result: 0, onAfterReturn:{}};
+      resp.onAfterReturn['cmd[nosqldb]'] =
+        'sh /var/lib/jelastic/valkey-cluster/init-cluster.sh --role form --peers "' + addrs.join(' ') + '"' +
+        ' --port ${globals.clientPort} --bus-port ${globals.clusterBusPort} --replicas ${settings.replicasPerPrimary}';
+      resp.onAfterReturn['user'] = 'root';
+      return resp;
+
+  checkCluster:
+    cmd[${nodes.nosqldb.master.id}]:
+      - sh /var/lib/jelastic/valkey-cluster/init-cluster.sh --role check --port ${globals.clientPort}
+    user: root
+
+responses:
+  # The documented way to turn an action result code into a message the dashboard shows. Without it,
+  # a nonzero result is an anonymous red cross.
+  1001:
+    type: error
+    message: 'Node discovery failed: the platform reported fewer than 3 nodes in the nosqldb group, so no cluster could be formed. Check the topology and reinstall.'
+
+success:
+  email: false
+  text: |
+    **Valkey cluster ${settings.nodeCount} nodes, formed at install.**
+
+    Cluster state is printed in the log of the last step. Client access from inside the environment:
+
+    `valkey-cli -c -h node${nodes.nosqldb.master.id}-${env.domain} -p 6379 -a '<password>' cluster info`
+
+    Password: ${globals.valkeyPswd}
+
+    Clients must follow redirects: a cluster replies MOVED, so use a cluster-aware client (or
+    `valkey-cli -c`). Single-node assumptions like MULTI/EXEC across keys will not work.
+
+    Scaling adds a node but does not reshard the slots; run
+    `valkey-cli --cluster reshard` yourself when you are ready to move data.

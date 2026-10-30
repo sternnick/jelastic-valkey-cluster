@@ -1,0 +1,131 @@
+type: install
+name: Valkey cluster network probe
+id: valkey-net-probe
+version: 1.0.4
+targetEditions: any
+logo: /images/valkey-cluster.png?raw=true
+
+description:
+  short: Three throwaway containers that answer the networking question with TCP, not with Valkey
+  text: >
+    Creates a three-node environment from the same image the cluster manifest uses, puts a TCP
+    listener on 6379 and 16379 in every node, proves the listener answers on its own node, and then
+    connects every node to every other node on both ports. No Valkey process runs and nothing is
+    exposed publicly. The self-test is what makes the result readable: a listener that never started
+    would otherwise look exactly like a blocked port, so the probe refuses to report a matrix until
+    its own listeners accept a connection.
+
+categories:
+  - apps/clusters
+
+# The same pinned ref as manifest.jps - the probe and the product must never be fetched from two
+# different generations, and tests/validate.sh checks the two agree. Before installing, replace
+# <owner>/<repo> with the account and repository this file is served from.
+baseUrl: https://raw.githubusercontent.com/<owner>/<repo>/v1.0.4
+
+globals:
+  imageRepo: valkey/valkey
+  imageTag: 9.1.3-alpine3.24
+  clientPort: 6379
+  # The bus port is client port + 10000 unless cluster-port says otherwise; that is the source's own
+  # rule for cluster-port = 0, which is what the product runs with.
+  clusterBusPort: 16379
+  dir: /var/lib/jelastic/net-probe
+
+settings:
+  fields:
+    # A literal, not ${globals.clientPort},${globals.clusterBusPort}: placeholders are NOT expanded
+    # inside a settings default - measured on a deployed probe node on 2026-10-27, where this field
+    # arrived verbatim as JELASTIC_PORTS=,${globals.clusterBusPort}. (They do expand in cmd/script
+    # steps and in node env values; a cluster node in the same deployment shows
+    # JELASTIC_PORTS=6379,16379.)
+    # Run A: leave this at the default. Run B: clear it, install the probe again as a second
+    # environment, and compare the two matrices. JELASTIC_PORTS is documented for certified stacks;
+    # the vendor's own answer about custom Docker images is that the platform firewall does not apply
+    # to them, so the honest expectation is "no observable difference" - and that is a result, not a
+    # failure. One successful run proves nothing on its own, which is why both runs are asked for.
+    - name: firewallPorts
+      type: string
+      caption: 'JELASTIC_PORTS value (clear this field for the B run of the A/B comparison)'
+      default: '6379,16379'
+      required: false
+
+nodes:
+  - image: ${globals.imageRepo}:${globals.imageTag}
+    nodeGroup: nosqldb
+    count: 3
+    cloudlets: 8
+    diskLimit: 8
+    displayName: Probe
+    skipNodeEmails: true
+    env:
+      JELASTIC_PORTS: '${settings.firewallPorts}'
+
+onInstall:
+  - fetch
+  - listen
+  - selftest
+  - mesh
+
+actions:
+  fetch:
+    cmd [nosqldb]:
+      - mkdir -p ${globals.dir}
+      - wget -qO ${globals.dir}/probe.sh "${baseUrl}/probes/probe.sh"
+      - chmod +x ${globals.dir}/probe.sh
+      - test -s ${globals.dir}/probe.sh
+    user: root
+
+  listen:
+    # Records ip -br addr / ip addr / ip route / the addresses this node has / the packet filter /
+    # how JELASTIC_PORTS reached this node, then starts the re-arming listeners.
+    cmd [nosqldb]:
+      - sh ${globals.dir}/probe.sh --role listen --port ${globals.clientPort} --bus-port ${globals.clusterBusPort} --log /var/log/jelastic-probe.log
+    user: root
+
+  selftest:
+    # Each node connects to its own listener before anyone is allowed to conclude anything about
+    # another node. Failure here means the test is broken, not the network.
+    cmd [nosqldb]:
+      - sh ${globals.dir}/probe.sh --role selftest --port ${globals.clientPort} --bus-port ${globals.clusterBusPort} --log /var/log/jelastic-probe.log
+    user: root
+
+  mesh:
+    script: |
+      var resp = jelastic.env.control.GetEnvInfo('${env.envName}', session);
+      if (resp.result != 0) return resp;
+
+      var addrs = [];
+      for (var i = 0, n = resp.nodes; i < n.length; i++) {
+        if (n[i].nodeGroup == 'nosqldb' && n[i].address) addrs.push(n[i].address);
+      }
+
+      // Nonzero, because result 0 tells the engine this step succeeded. Declared under responses:.
+      if (addrs.length < 3) {
+        return {result: 1002, errorMessage: 'expected 3 probe nodes, found ' + addrs.length};
+      }
+
+      resp = {result: 0, onAfterReturn:{}};
+      resp.onAfterReturn['cmd[nosqldb]'] =
+        'sh ${globals.dir}/probe.sh --role test --peers "' + addrs.join(' ') + '"' +
+        ' --port ${globals.clientPort} --bus-port ${globals.clusterBusPort} --log /var/log/jelastic-probe.log' +
+        '; ec=$?; echo "---- /var/log/jelastic-probe.log ----"; cat /var/log/jelastic-probe.log; exit $ec';
+      resp.onAfterReturn['user'] = 'root';
+      return resp;
+
+responses:
+  1002:
+    type: error
+    message: 'Node discovery failed: the platform reported fewer than 3 probe nodes, so no connectivity matrix could be built.'
+
+success:
+  email: false
+  text: |
+    **Connectivity matrix complete.** The full record - addresses, routes, listeners, packet filter
+    and every directed connection test - is in `/var/log/jelastic-probe.log` on each node and in the
+    install log.
+
+    Nodes tested: ${env.envName}, ports ${globals.clientPort} (client) and ${globals.clusterBusPort} (cluster bus), JELASTIC_PORTS set to `${settings.firewallPorts}`.
+
+    To finish the A/B comparison, install this probe a second time as a separate environment with the
+    JELASTIC_PORTS field cleared, and diff the two matrices.
